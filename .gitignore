@@ -1,0 +1,18 @@
+# Cartelle di build e temporanei
+Builds/
+JUCE/Builds/
+.vs/
+Binaries/
+x64/
+Debug/
+Release/
+
+# File binari e database grandi
+*.obj
+*.lib
+*.pdb
+*.exe
+*.sdf
+*.db
+*.ipch
+*.log
