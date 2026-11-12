@@ -39,6 +39,10 @@ private:
     juce::TextButton leftThumbToggle;
     juce::TextButton rightThumbToggle;
 
+    // Selezione della sorgente audio
+    juce::ComboBox inputModeSelector;
+    juce::Label inputModeLabel;
+
     bool testCppChorus = true;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)

@@ -11,6 +11,7 @@
 #include <JuceHeader.h>
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_dsp/juce_dsp.h>
+#include <array>
 
 //==============================================================================
 /**
@@ -20,6 +21,13 @@ class HsVSTAudioProcessor  : public juce::AudioProcessor
 public:
 
     friend class MainComponent;
+
+    // --- Modalità di ingresso ---
+    enum class InputMode
+    {
+        Test,
+        ExternalAudio
+    };
 
     //==============================================================================
     HsVSTAudioProcessor();
@@ -58,16 +66,42 @@ public:
     void getStateInformation (juce::MemoryBlock& destData) override;
     void setStateInformation (const void* data, int sizeInBytes) override;
 
+
+    void setInputMode(InputMode mode)
+    {
+        inputMode.store(mode);
+    }
+
+    InputMode getInputMode() const
+    {
+        return inputMode.load();
+    }
+
 private:
+
+    std::atomic<InputMode> inputMode{ InputMode::Test };
+
     //==============================================================================
-    
-    private:
-    // --- Variabili di stato del Synth ---
+    // Stato del generatore interno
     double currentSampleRate = 44100.0;
     float currentFrequency = 440.0f;
     double phase = 0.0;
     bool isPlaying = false;
     int activeNotes = 0;
+    float envelope = 0.0f;
+
+    // Una voce per ogni nota MIDI
+    struct SynthVoice
+    {
+        int noteNumber = -1;
+        float frequency = 440.0f;
+        double phase = 0.0;
+        float envelope = 0.0f;
+        bool isPlaying = false;
+    };
+    // Sintetizzatore polifonico a 8 voci
+    std::array<SynthVoice, 8> voices;
+
 
     // --- Variabili Atomiche ---
     std::atomic<float> atomicDrive{ 0.0f };
@@ -85,21 +119,22 @@ private:
     juce::dsp::StateVariableTPTFilter<float> masterLpfL;
     juce::dsp::StateVariableTPTFilter<float> masterLpfR;
 
-    
+    // Ultimo cutoff applicato ai filtri
+    float lastAppliedLpfCutoff = -1.0f;
+
+    //FLANGER
     struct SimpleFlanger
     {
         void prepare(double sr)
         {
             currentSampleRate = sr;
 
-            // Calcoliamo la dimensione massima basandoci su 192kHz per sicurezza totale
-            size_t maxPossibleSize = static_cast<size_t>(192000.0 * 0.05) + 512;
+            // Calcoliamo la dimensione massima
+            size_t maxPossibleSize =
+                static_cast<size_t>(currentSampleRate * 0.006) + 2;
 
-            // Ridimensiona solo se necessario per evitare riallocazioni continue
-            if (buffer.size() < maxPossibleSize)
-            {
-                buffer.resize(maxPossibleSize, 0.0f);
-            }
+            // Ridimensiona e azzera il buffer a ogni inizializzazione
+            buffer.assign(maxPossibleSize, 0.0f);
 
             writePos = 0;
             lfoPhase = 0.0f;
@@ -110,7 +145,7 @@ private:
             if (buffer.empty()) return input;
             const size_t bufSize = buffer.size();
             if (bufSize < 2) return input;
-            if (depth < 0.001f) return input;
+            
 
             lfoPhase += 2.0f * static_cast<float>(juce::MathConstants<double>::pi) * 0.4f / static_cast<float>(currentSampleRate);
             if (lfoPhase >= 2.0f * static_cast<float>(juce::MathConstants<double>::pi))
@@ -150,6 +185,9 @@ private:
 
             writePos = (writePos + 1) % intBufSize;
 
+            if (depth < 0.001f)
+                return input;
+
             return input + delayedSample * depth * 0.7f;
         }
 
@@ -168,13 +206,17 @@ private:
         // Costruttore di default sicuro per evitare corruzioni nei container
         SimpleDelayLine() = default;
 
-        void init(float maxDelaySeconds, float sr) {
+        void init(float maxDelaySeconds, float sr)
+        {
             sampleRate = sr;
-            int maxPossibleSize = static_cast<int>(maxDelaySeconds * 192000.0f) + 512;
 
-            if (buffer.size() < static_cast<size_t>(maxPossibleSize)) {
-                buffer.assign(maxPossibleSize, 0.0f);
-            }
+            // Dimensiona il buffer usando il sample rate reale
+            int maxPossibleSize =
+                static_cast<int>(maxDelaySeconds * sampleRate) + 2;
+
+            // Ridimensiona e azzera sempre il buffer
+            buffer.assign(maxPossibleSize, 0.0f);
+
             writeIndex = 0;
         }
 
@@ -262,8 +304,8 @@ private:
         float phase3 = 4.188f; // 240 gradi
 
         void prepare(float sampleRate) {
-            for (auto& dl : delayLinesLeft)  dl.init(1.0f, sampleRate);
-            for (auto& dl : delayLinesRight) dl.init(1.0f, sampleRate);
+            for (auto& dl : delayLinesLeft)  dl.init(0.04f, sampleRate);
+            for (auto& dl : delayLinesRight) dl.init(0.04f, sampleRate);
             phase1 = 0.0f;
             phase2 = 2.094f;
             phase3 = 4.188f;
@@ -282,7 +324,7 @@ private:
             if (phase3 >= twoPi) phase3 -= twoPi;
         }
 
-        float processSampleLeft(float sample, float depth, float rate, float mix, float sampleRate) {
+        float processSampleLeft(float sample, float depth, float mix, float sampleRate) {
             delayLinesLeft[0].pushSample(sample);
             delayLinesLeft[1].pushSample(sample);
             delayLinesLeft[2].pushSample(sample);
@@ -310,7 +352,7 @@ private:
             return (1.0f - effectiveMix) * sample + effectiveMix * wet;
         }
 
-        float processSampleRight(float sample, float depth, float rate, float mix, float sampleRate) {
+        float processSampleRight(float sample, float depth, float mix, float sampleRate) {
             delayLinesRight[0].pushSample(sample);
             delayLinesRight[1].pushSample(sample);
             delayLinesRight[2].pushSample(sample);
@@ -382,8 +424,9 @@ private:
 
     SimpleFlanger flangerModuleL;
     SimpleFlanger flangerModuleR;
-    ChorusModule chorusModuleL;
-    ChorusModule chorusModuleR;
+
+    ChorusModule chorusModule;
+
     DistortionModule distortionModuleL;
     DistortionModule distortionModuleR;
     

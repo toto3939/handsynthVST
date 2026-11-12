@@ -41,7 +41,6 @@ void MainComponent::sendAll()
     // Sarà il processBlock nel thread audio a leggerle e applicare il target in modo sicuro.
     processor.atomicLpfCutoff.store(lpfFreq);
     processor.atomicDrive.store(rightThumb);
-    processor.atomicChorusRate.store(0.2f + (leftThumb * 1.8f));
     processor.atomicChorusDepth.store(rightOpen);
     processor.atomicFlangerDepth.store(leftThumb);
 
@@ -70,6 +69,40 @@ MainComponent::MainComponent(HsVSTAudioProcessor& processorRef)
     : processor(processorRef)
 {
 
+
+    // --- Selezione della sorgente audio ---
+    addAndMakeVisible(inputModeLabel);
+    inputModeLabel.setText("Audio Source", juce::dontSendNotification);
+    inputModeLabel.setJustificationType(juce::Justification::centred);
+
+    addAndMakeVisible(inputModeSelector);
+
+    inputModeSelector.addItem("Test - Square Wave", 1);
+    inputModeSelector.addItem("External Audio", 2);
+
+    // Sincronizza il selettore con la modalità del processore
+    inputModeSelector.setSelectedId(
+        processor.getInputMode() == HsVSTAudioProcessor::InputMode::Test
+        ? 1 : 2,
+        juce::dontSendNotification
+    );
+
+    // Aggiorna il processore quando l'utente cambia modalità
+    inputModeSelector.onChange = [this]()
+        {
+            if (inputModeSelector.getSelectedId() == 1)
+            {
+                processor.setInputMode(HsVSTAudioProcessor::InputMode::Test);
+                DBG("Modalita selezionata: TEST");
+            }
+            else if (inputModeSelector.getSelectedId() == 2)
+            {
+                processor.setInputMode(HsVSTAudioProcessor::InputMode::ExternalAudio);
+                DBG("Modalita selezionata: EXTERNAL AUDIO");
+            }
+        };
+
+
     // --- 1. CONNETTI SUBITO L'OSC IN CIMA ---
     sender.connect("127.0.0.1", 57130);
     processingSender.connect("127.0.0.1", 9001);
@@ -90,7 +123,21 @@ MainComponent::MainComponent(HsVSTAudioProcessor& processorRef)
     leftHandKnob.setRange(0.0, 1.0);
     leftHandKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
     leftHandKnob.setInterceptsMouseClicks(true, false);
-    leftHandKnob.setValue(0.0, juce::dontSendNotification);
+    // Legge il cutoff attuale dal processore
+    float currentCutoff = processor.atomicLpfCutoff.load();
+
+    // Converte la frequenza nel valore normalizzato della manopola (0-1)
+    float normalizedCutoff = std::log(currentCutoff / 200.0f)
+        / std::log(8000.0f / 200.0f);
+
+    // Imposta la manopola senza generare notifiche
+    leftHandKnob.setValue(
+        juce::jlimit(0.0f, 1.0f, normalizedCutoff),
+        juce::dontSendNotification
+    );
+
+
+
 
     leftHandKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xff00a8b5).withAlpha(0.12f));
     leftHandKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xff00a8b5).withAlpha(0.6f));
@@ -109,7 +156,10 @@ MainComponent::MainComponent(HsVSTAudioProcessor& processorRef)
     leftThumbSlider.setRange(0.0, 1.0);
     leftThumbSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
     leftThumbSlider.setInterceptsMouseClicks(true, false);
-    leftThumbSlider.setValue(0.0, juce::dontSendNotification);
+    leftThumbSlider.setValue(
+        juce::jlimit(0.0f, 1.0f, processor.atomicFlangerDepth.load()),
+        juce::dontSendNotification
+    );
 
     leftThumbSlider.setColour(juce::Slider::trackColourId, juce::Colour(0xff00a8b5).withAlpha(0.6f));
     leftThumbSlider.setColour(juce::Slider::thumbColourId, juce::Colour(0xff77e4d4));
@@ -127,7 +177,10 @@ MainComponent::MainComponent(HsVSTAudioProcessor& processorRef)
     rightHandKnob.setRange(0.0, 1.0);
     rightHandKnob.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
     rightHandKnob.setInterceptsMouseClicks(true, false);
-    rightHandKnob.setValue(0.0, juce::dontSendNotification);
+    rightHandKnob.setValue(
+        juce::jlimit(0.0f, 1.0f, processor.atomicChorusDepth.load()),
+        juce::dontSendNotification
+    );
 
     rightHandKnob.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xff4a7c59).withAlpha(0.12f));
     rightHandKnob.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xff4a7c59).withAlpha(0.6f));
@@ -146,7 +199,10 @@ MainComponent::MainComponent(HsVSTAudioProcessor& processorRef)
     rightThumbSlider.setRange(0.0, 1.0);
     rightThumbSlider.setTextBoxStyle(juce::Slider::NoTextBox, false, 0, 0);
     rightThumbSlider.setInterceptsMouseClicks(true, false);
-    rightThumbSlider.setValue(0.0, juce::dontSendNotification);
+    rightThumbSlider.setValue(
+        juce::jlimit(0.0f, 1.0f, processor.atomicDrive.load()),
+        juce::dontSendNotification
+    );
 
     rightThumbSlider.setColour(juce::Slider::trackColourId, juce::Colour(0xff4a7c59).withAlpha(0.6f));
     rightThumbSlider.setColour(juce::Slider::thumbColourId, juce::Colour(0xff9cb380));
@@ -269,6 +325,19 @@ void MainComponent::paint(juce::Graphics& g)
 void MainComponent::resized()
 {
     auto area = getLocalBounds().reduced(40, 30);
+
+
+    // --- Posizionamento selettore sorgente audio ---
+    auto inputModeArea = area.removeFromTop(65);
+
+    inputModeLabel.setBounds(
+        inputModeArea.removeFromLeft(150)
+    );
+
+    inputModeSelector.setBounds(
+        inputModeArea.removeFromLeft(220).reduced(5, 15)
+    );
+
 
     auto middleRowArea = area.removeFromTop(area.getHeight() * 0.5f);
     auto bottomRowArea = area;

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <JUCERPROJECT id="kuPQha" name="hsVST" projectType="audioplug" useAppConfig="0"
-              addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1">
+              addUsingNamespaceToJuceHeader="0" jucerFormatVersion="1" pluginCharacteristicsValue="pluginWantsMidiIn">
   <MAINGROUP id="ymifaW" name="hsVST">
     <GROUP id="{EF5B71E7-BDBF-574C-159B-5678266EAF44}" name="Source">
       <FILE id="DdxZN4" name="MainComponent.cpp" compile="1" resource="0"

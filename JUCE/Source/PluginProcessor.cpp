@@ -27,7 +27,7 @@ HsVSTAudioProcessor::HsVSTAudioProcessor()
     atomicFlangerDepth.store(0.0f);
     atomicChorusDepth.store(0.0f);
     atomicDrive.store(0.0f);
-    atomicChorusRate.store(0.5f);
+    atomicChorusRate.store(0.8f);
 }
 
 HsVSTAudioProcessor::~HsVSTAudioProcessor()
@@ -100,6 +100,14 @@ void HsVSTAudioProcessor::changeProgramName (int index, const juce::String& newN
 void HsVSTAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     currentSampleRate = sampleRate;
+    envelope = 0.0f;
+
+    // Inizializza le 8 voci del sintetizzatore
+    for (auto& voice : voices)
+    {
+        voice = SynthVoice{};
+    }
+
 
     // Inizializza e sincronizza le smoothed values con le atomiche attuali
     smoothedChorusDepth.reset(sampleRate, 0.05);
@@ -119,8 +127,7 @@ void HsVSTAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
     distortionModuleL.prepare(spec);
     distortionModuleR.prepare(spec);
 
-    chorusModuleL.prepare(static_cast<float>(sampleRate));
-    chorusModuleR.prepare(static_cast<float>(sampleRate));
+    chorusModule.prepare(static_cast<float>(sampleRate));
 
     flangerModuleL.prepare(sampleRate);
     flangerModuleR.prepare(sampleRate);
@@ -130,6 +137,14 @@ void HsVSTAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 
     masterLpfR.prepare(spec);
     masterLpfR.setType(juce::dsp::StateVariableTPTFilterType::lowpass);
+
+    // Sincronizza il cutoff iniziale dei due filtri
+    float initialCutoff = atomicLpfCutoff.load();
+
+    masterLpfL.setCutoffFrequency(initialCutoff);
+    masterLpfR.setCutoffFrequency(initialCutoff);
+
+    lastAppliedLpfCutoff = initialCutoff;
 }
 
 
@@ -184,21 +199,62 @@ void HsVSTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
             currentFrequency = static_cast<float>(juce::MidiMessage::getMidiNoteInHertz(message.getNoteNumber()));
             activeNotes++;
             isPlaying = true;
+
+            // Cerca una voce libera per la nuova nota MIDI
+            for (auto& voice : voices)
+            {
+                if (voice.noteNumber == -1 || !voice.isPlaying)
+                {
+                    voice.noteNumber = message.getNoteNumber();
+                    voice.frequency = static_cast<float>(
+                        juce::MidiMessage::getMidiNoteInHertz(message.getNoteNumber())
+                        );
+                    voice.phase = 0.0;
+                    voice.envelope = 0.0f;
+                    voice.isPlaying = true;
+                    break;
+                }
+            }
         }
         else if (message.isNoteOff() || (message.isNoteOn() && message.getVelocity() == 0))
         {
             activeNotes--;
+
             if (activeNotes <= 0)
             {
                 activeNotes = 0;
                 isPlaying = false;
             }
+
+            // Rilascia la voce corrispondente alla nota MIDI
+            for (auto& voice : voices)
+            {
+                if (voice.noteNumber == message.getNoteNumber() && voice.isPlaying)
+                {
+                    voice.isPlaying = false;
+                    break;
+                }
+            }
         }
     }
 
-    // 2. Estrazione dei puntatori audio dal buffer della DAW
+    // 2. Lettura della sorgente audio
+    const auto mode = inputMode.load();
+
+    const float* inputLeft = totalNumInputChannels > 0
+        ? buffer.getReadPointer(0)
+        : nullptr;
+
+    const float* inputRight = totalNumInputChannels > 1
+        ? buffer.getReadPointer(1)
+        : inputLeft;
+
+    // Puntatori per l'uscita
     auto* leftChannel = buffer.getWritePointer(0);
-    auto* rightChannel = buffer.getNumChannels() > 1 ? buffer.getWritePointer(1) : leftChannel;
+
+    auto* rightChannel = buffer.getNumChannels() > 1
+        ? buffer.getWritePointer(1)
+        : leftChannel;
 
     // 3. Sintesi ed elaborazione DSP (Thread-safe con le atomiche)
     float driveVal = atomicDrive.load();
@@ -211,46 +267,99 @@ void HsVSTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
     float distMixVal = 0.5f;
     float chorusMixVal = 0.5f;
     double sampleRate = currentSampleRate;
-    static float envelope = 0.0f;
+    
 
     for (int i = 0; i < buffer.getNumSamples(); ++i)
     {
-        float sample = 0.0f;
-        float targetEnv = isPlaying ? 0.3f : 0.0f;
+        float sampleL = 0.0f;
+        float sampleR = 0.0f;
 
-        envelope += (targetEnv - envelope) * 0.001f;
-
-        if (envelope > 0.0001f)
+        if (mode == InputMode::Test)
         {
-            float squareVal = (std::sin(phase) >= 0.0f) ? 1.0f : -1.0f;
-            sample = squareVal * envelope * 0.5f;
+            float mixedSample = 0.0f;
 
-            phase += 2.0 * juce::MathConstants<double>::pi * currentFrequency / sampleRate;
-            if (phase >= 2.0 * juce::MathConstants<double>::pi)
-                phase -= 2.0 * juce::MathConstants<double>::pi;
+            // Elabora tutte le 8 voci
+            for (auto& voice : voices)
+            {
+                if (voice.noteNumber == -1)
+                    continue;
+
+                // Inviluppo indipendente per ogni nota
+                float targetEnv = voice.isPlaying ? 0.3f : 0.0f;
+
+                voice.envelope +=
+                    (targetEnv - voice.envelope) * 0.001f;
+
+                if (voice.envelope > 0.0001f)
+                {
+                    // Oscillatore a onda quadra
+                    float squareVal = (std::sin(voice.phase) >= 0.0)
+                        ? 1.0f : -1.0f;
+
+                    mixedSample += squareVal * voice.envelope;
+
+                    // Avanza la fase della singola voce
+                    voice.phase +=
+                        2.0 * juce::MathConstants<double>::pi
+                        * voice.frequency / sampleRate;
+
+                    if (voice.phase >=
+                        2.0 * juce::MathConstants<double>::pi)
+                    {
+                        voice.phase -=
+                            2.0 * juce::MathConstants<double>::pi;
+                    }
+                }
+                else if (!voice.isPlaying)
+                {
+                    // La nota è terminata: libera la voce
+                    voice = SynthVoice{};
+                }
+            }
+
+            // Riduce il volume complessivo per evitare clipping
+            sampleL = mixedSample * 0.125f;
+            sampleR = sampleL;
         }
         else
         {
-            phase = 0.0;
+            if (inputLeft != nullptr)
+                sampleL = inputLeft[i];
+
+            if (inputRight != nullptr)
+                sampleR = inputRight[i];
+            else
+                sampleR = sampleL;
         }
 
-        // Distorsione
-        float distL = distortionModuleL.processSample(sample, driveVal, distMixVal);
-        float distR = distortionModuleR.processSample(sample, driveVal, distMixVal);
+        float distL = distortionModuleL.processSample(sampleL, driveVal, distMixVal);
+        float distR = distortionModuleR.processSample(sampleR, driveVal, distMixVal);
 
         float finalL = distL;
         float finalR = distR;
 
         // Chorus
         float chorusDepthVal = smoothedChorusDepth.getNextValue();
-        if (chorusDepthVal > 0.001f)
-        {
-            chorusModuleL.advancePhase(chorusRateVal, static_cast<float>(currentSampleRate));
-            chorusModuleR.advancePhase(chorusRateVal, static_cast<float>(currentSampleRate));
+        
+            chorusModule.advancePhase(
+                chorusRateVal,
+                static_cast<float>(currentSampleRate)
+            );
 
-            finalL = chorusModuleL.processSampleLeft(distL, chorusDepthVal, chorusRateVal, chorusMixVal, static_cast<float>(currentSampleRate));
-            finalR = chorusModuleR.processSampleRight(distR, chorusDepthVal, chorusRateVal, chorusMixVal, static_cast<float>(currentSampleRate));
-        }
+            finalL = chorusModule.processSampleLeft(
+                distL,
+                chorusDepthVal,
+                chorusMixVal,
+                static_cast<float>(currentSampleRate)
+            );
+
+            finalR = chorusModule.processSampleRight(
+                distR,
+                chorusDepthVal,
+                chorusMixVal,
+                static_cast<float>(currentSampleRate)
+            );
+        
 
         // Flanger
         float flangerDepthVal = smoothedFlangerDepth.getNextValue();
@@ -259,12 +368,19 @@ void HsVSTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
 
         // Filtro LPF Master
         float currentLpfCutoff = smoothedLpfCutoff.getNextValue();
-        masterLpfL.setCutoffFrequency(currentLpfCutoff);
-        masterLpfR.setCutoffFrequency(currentLpfCutoff);
 
-        // Filtro LPF Master
+        // Aggiorna i filtri soltanto quando cambia il cutoff
+        if (currentLpfCutoff != lastAppliedLpfCutoff)
+        {
+            masterLpfL.setCutoffFrequency(currentLpfCutoff);
+            masterLpfR.setCutoffFrequency(currentLpfCutoff);
+
+            lastAppliedLpfCutoff = currentLpfCutoff;
+        }
+
         float filteredL = masterLpfL.processSample(0, finalL);
         float filteredR = masterLpfR.processSample(0, finalR);
+
 
         // Uscita audio sinistra
         leftChannel[i] = std::clamp(filteredL, -0.95f, 0.95f);
@@ -292,17 +408,62 @@ juce::AudioProcessorEditor* HsVSTAudioProcessor::createEditor()
 }
 
 //==============================================================================
-void HsVSTAudioProcessor::getStateInformation (juce::MemoryBlock& destData)
+void HsVSTAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
 {
-    // You should use this method to store your parameters in the memory block.
-    // You could do that either as raw data, or use the XML or ValueTree classes
-    // as intermediaries to make it easy to save and load complex data.
+    juce::ValueTree state("HandSynthState");
+
+    state.setProperty("inputMode",
+        static_cast<int>(inputMode.load()), nullptr);
+
+    state.setProperty("lpfCutoff",
+        atomicLpfCutoff.load(), nullptr);
+
+    state.setProperty("distortion",
+        atomicDrive.load(), nullptr);
+
+    state.setProperty("chorusDepth",
+        atomicChorusDepth.load(), nullptr);
+
+    state.setProperty("chorusRate",
+        atomicChorusRate.load(), nullptr);
+
+    state.setProperty("flangerDepth",
+        atomicFlangerDepth.load(), nullptr);
+
+    juce::MemoryOutputStream stream(destData, false);
+    state.writeToStream(stream);
 }
 
-void HsVSTAudioProcessor::setStateInformation (const void* data, int sizeInBytes)
+void HsVSTAudioProcessor::setStateInformation(const void* data, int sizeInBytes)
 {
-    // You should use this method to restore your parameters from this memory block,
-    // whose contents will have been created by the getStateInformation() call.
+    auto state = juce::ValueTree::readFromData(data, sizeInBytes);
+
+    if (!state.isValid() || !state.hasType("HandSynthState"))
+        return;
+
+    int savedMode = static_cast<int>(
+        state.getProperty("inputMode", 0));
+
+    setInputMode(
+        savedMode == 1
+        ? InputMode::ExternalAudio
+        : InputMode::Test
+    );
+
+    atomicLpfCutoff.store(static_cast<float>(
+        state.getProperty("lpfCutoff", 8000.0f)));
+
+    atomicDrive.store(static_cast<float>(
+        state.getProperty("distortion", 0.0f)));
+
+    atomicChorusDepth.store(static_cast<float>(
+        state.getProperty("chorusDepth", 0.0f)));
+
+    atomicChorusRate.store(static_cast<float>(
+        state.getProperty("chorusRate", 0.2f)));
+
+    atomicFlangerDepth.store(static_cast<float>(
+        state.getProperty("flangerDepth", 0.0f)));
 }
 
 //==============================================================================
