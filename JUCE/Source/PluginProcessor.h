@@ -79,6 +79,8 @@ public:
 
 private:
 
+    void handleMidiMessages(const juce::MidiBuffer& midiMessages);
+
     std::atomic<InputMode> inputMode{ InputMode::Test };
 
     //==============================================================================

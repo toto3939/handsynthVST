@@ -180,23 +180,20 @@ bool HsVSTAudioProcessor::isBusesLayoutSupported (const BusesLayout& layouts) co
 }
 #endif
 
-void HsVSTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+
+void HsVSTAudioProcessor::handleMidiMessages(
+    const juce::MidiBuffer& midiMessages)
 {
-    juce::ScopedNoDenormals noDenormals;
-    auto totalNumInputChannels = getTotalNumInputChannels();
-    auto totalNumOutputChannels = getTotalNumOutputChannels();
-
-    // Pulizia dei canali di output in eccesso
-    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
-        buffer.clear(i, 0, buffer.getNumSamples());
-
-    // 1. Gestione dei messaggi MIDI in arrivo dalla DAW
+    // Gestione dei messaggi MIDI in arrivo dalla DAW
     for (const auto metadata : midiMessages)
     {
         auto message = metadata.getMessage();
+
         if (message.isNoteOn() && message.getVelocity() > 0)
         {
-            currentFrequency = static_cast<float>(juce::MidiMessage::getMidiNoteInHertz(message.getNoteNumber()));
+            currentFrequency = static_cast<float>(
+                juce::MidiMessage::getMidiNoteInHertz(message.getNoteNumber()));
+
             activeNotes++;
             isPlaying = true;
 
@@ -207,8 +204,8 @@ void HsVSTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
                 {
                     voice.noteNumber = message.getNoteNumber();
                     voice.frequency = static_cast<float>(
-                        juce::MidiMessage::getMidiNoteInHertz(message.getNoteNumber())
-                        );
+                        juce::MidiMessage::getMidiNoteInHertz(message.getNoteNumber()));
+
                     voice.phase = 0.0;
                     voice.envelope = 0.0f;
                     voice.isPlaying = true;
@@ -216,7 +213,8 @@ void HsVSTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
                 }
             }
         }
-        else if (message.isNoteOff() || (message.isNoteOn() && message.getVelocity() == 0))
+        else if (message.isNoteOff() ||
+            (message.isNoteOn() && message.getVelocity() == 0))
         {
             activeNotes--;
 
@@ -237,6 +235,21 @@ void HsVSTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::M
             }
         }
     }
+}
+
+
+void HsVSTAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midiMessages)
+{
+    juce::ScopedNoDenormals noDenormals;
+    auto totalNumInputChannels = getTotalNumInputChannels();
+    auto totalNumOutputChannels = getTotalNumOutputChannels();
+
+    // Pulizia dei canali di output in eccesso
+    for (auto i = totalNumInputChannels; i < totalNumOutputChannels; ++i)
+        buffer.clear(i, 0, buffer.getNumSamples());
+
+    // 1. Gestione dei messaggi MIDI in arrivo dalla DAW
+    handleMidiMessages(midiMessages);
 
     // 2. Lettura della sorgente audio
     const auto mode = inputMode.load();
